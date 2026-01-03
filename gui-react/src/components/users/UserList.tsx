@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -37,15 +37,16 @@ export function UserList() {
   const [userToDelete, setUserToDelete] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const { user: currentUser } = useAuth();
+// 🔒 VOTAL.AI Security Fix: Sensitive Data Exposure: Plaintext Password in State [CWE-256] - MEDIUM
   
   // Form state for new user
   const [newUser, setNewUser] = useState({
     username: '',
     email: '',
-    password: '',
     full_name: '',
     role: 'viewer',
   });
+  const passwordRef = useRef('');
 
   const loadUsers = async () => {
     setLoading(true);
@@ -84,15 +85,15 @@ export function UserList() {
 
   const handleCreateUser = async () => {
     try {
-      await api.createUser(newUser);
+      await api.createUser({ ...newUser, password: passwordRef.current });
       setCreateDialogOpen(false);
       setNewUser({
         username: '',
         email: '',
-        password: '',
         full_name: '',
         role: 'viewer',
       });
+      passwordRef.current = '';
       loadUsers();
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to create user');
@@ -259,8 +260,8 @@ export function UserList() {
             <TextField
               label="Password"
               type="password"
-              value={newUser.password}
-              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+              value={passwordRef.current}
+              onChange={(e) => { passwordRef.current = e.target.value; }}
               fullWidth
               required
               helperText="Minimum 12 characters"
@@ -284,7 +285,7 @@ export function UserList() {
           <Button 
             onClick={handleCreateUser} 
             variant="contained"
-            disabled={!newUser.username || !newUser.email || !newUser.password || !newUser.full_name}
+            disabled={!newUser.username || !newUser.email || !passwordRef.current || !newUser.full_name}
           >
             Create
           </Button>
