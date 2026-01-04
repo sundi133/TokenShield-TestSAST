@@ -34,10 +34,10 @@ func NewServer(handler Handler, debug bool) *Server {
 // HandleConnection processes an ICAP connection
 func (s *Server) HandleConnection(conn net.Conn) {
 	defer conn.Close()
-	
+
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-	
+
 	// Read request line
 	requestLine, err := reader.ReadString('\n')
 	if err != nil {
@@ -46,22 +46,22 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		}
 		return
 	}
-	
+
 	requestLine = strings.TrimSpace(requestLine)
 	parts := strings.Split(requestLine, " ")
 	if len(parts) < 3 {
 		log.Printf("Invalid request line: %s", requestLine)
 		return
 	}
-	
+
 	method := parts[0]
 	icapURI := parts[1]
 	version := parts[2]
-	
+
 	if s.debug {
 		log.Printf("ICAP Request: %s %s %s", method, icapURI, version)
 	}
-	
+
 	// Read headers
 	headers := make(map[string]string)
 	for {
@@ -74,7 +74,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		if line == "" {
 			break
 		}
-		
+
 		colonIndex := strings.Index(line, ":")
 		if colonIndex > 0 {
 			key := strings.TrimSpace(line[:colonIndex])
@@ -82,7 +82,7 @@ func (s *Server) HandleConnection(conn net.Conn) {
 			headers[key] = value
 		}
 	}
-	
+
 	switch method {
 	case "OPTIONS":
 		s.handleICAPOptions(writer, icapURI)
@@ -93,13 +93,15 @@ func (s *Server) HandleConnection(conn net.Conn) {
 	default:
 		log.Printf("Unsupported ICAP method: %s", method)
 	}
-	
+
 	writer.Flush()
+
+	_ = version
 }
 
 func (s *Server) handleICAPOptions(writer *bufio.Writer, icapURI string) {
 	response := fmt.Sprintf("ICAP/1.0 200 OK\r\n")
-	
+
 	// Support both REQMOD and RESPMOD based on the URI
 	if strings.Contains(icapURI, "/respmod") {
 		response += "Methods: RESPMOD\r\n"
@@ -114,10 +116,10 @@ func (s *Server) handleICAPOptions(writer *bufio.Writer, icapURI string) {
 	response += "Preview: 0\r\n"
 	response += "Transfer-Complete: *\r\n"
 	response += "\r\n"
-	
+
 	writer.WriteString(response)
 	writer.Flush()
-	
+
 	if s.debug {
 		log.Printf("Sent OPTIONS response for %s", icapURI)
 	}
@@ -130,23 +132,23 @@ func (s *Server) handleICAPReqmod(reader *bufio.Reader, writer *bufio.Writer, ic
 		log.Printf("Missing Encapsulated header")
 		return
 	}
-	
+
 	// Read HTTP request
 	httpRequest, httpHeaders, body, err := s.parseEncapsulated(reader, encapHeader)
 	if err != nil {
 		log.Printf("Error parsing encapsulated data: %v", err)
 		return
 	}
-	
+
 	if s.debug {
 		log.Printf("HTTP Request: %s", httpRequest)
 		log.Printf("Body length: %d", len(body))
 	}
-	
+
 	// Check if we need to modify
 	modified := false
 	modifiedBody := body
-	
+
 	if len(body) > 0 {
 		detokenized, wasModified, err := s.handler.DetokenizeJSON(string(body))
 		if err == nil && wasModified {
@@ -155,7 +157,7 @@ func (s *Server) handleICAPReqmod(reader *bufio.Reader, writer *bufio.Writer, ic
 			log.Printf("Detokenized request body")
 		}
 	}
-	
+
 	if !modified {
 		// Send 204 No Content
 		response := "ICAP/1.0 204 No Content\r\n\r\n"
@@ -163,23 +165,23 @@ func (s *Server) handleICAPReqmod(reader *bufio.Reader, writer *bufio.Writer, ic
 		writer.Flush()
 		return
 	}
-	
+
 	// Send modified response
 	response := "ICAP/1.0 200 OK\r\n"
-	
+
 	// Calculate positions
 	reqHdrLen := len(httpRequest) + 2 // +2 for \r\n
 	for _, hdr := range httpHeaders {
 		reqHdrLen += len(hdr) + 2
 	}
 	reqHdrLen += 2 // empty line
-	
+
 	response += fmt.Sprintf("Encapsulated: req-hdr=0, req-body=%d\r\n", reqHdrLen)
 	response += "\r\n"
-	
+
 	// Write HTTP request line
 	response += httpRequest + "\r\n"
-	
+
 	// Write HTTP headers (update Content-Length)
 	contentLengthUpdated := false
 	for _, hdr := range httpHeaders {
@@ -190,16 +192,16 @@ func (s *Server) handleICAPReqmod(reader *bufio.Reader, writer *bufio.Writer, ic
 			response += hdr + "\r\n"
 		}
 	}
-	
+
 	if !contentLengthUpdated {
 		response += fmt.Sprintf("Content-Length: %d\r\n", len(modifiedBody))
 	}
-	
+
 	response += "\r\n"
-	
+
 	// Write response
 	writer.WriteString(response)
-	
+
 	// Write body in chunks
 	s.writeChunked(writer, modifiedBody)
 	writer.Flush()
@@ -212,28 +214,28 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 		log.Printf("Missing Encapsulated header in RESPMOD")
 		return
 	}
-	
+
 	if s.debug {
 		log.Printf("RESPMOD: Processing response for tokenization")
 		log.Printf("Encapsulated: %s", encapHeader)
 	}
-	
+
 	// Parse the response (request + response)
 	httpRequest, httpHeaders, body, err := s.parseEncapsulated(reader, encapHeader)
 	if err != nil {
 		log.Printf("RESPMOD Error parsing encapsulated response data: %v", err)
 		return
 	}
-	
+
 	if s.debug {
 		log.Printf("Response HTTP Request: %s", httpRequest)
 		log.Printf("Response body length: %d", len(body))
 	}
-	
+
 	// Check if we need to tokenize the response
 	modified := false
 	modifiedBody := body
-	
+
 	// Handle null-body case - send 204 No Content
 	if len(body) == 0 {
 		if s.debug {
@@ -246,7 +248,7 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 		writer.Flush()
 		return
 	}
-	
+
 	// Look for JSON responses that might contain card data
 	if len(body) > 0 {
 		contentType := ""
@@ -256,12 +258,12 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 				break
 			}
 		}
-		
+
 		if strings.Contains(contentType, "application/json") {
 			if s.debug {
 				log.Printf("RESPMOD: Found JSON response, checking for cards to tokenize")
 			}
-			
+
 			tokenizedJSON, wasModified, err := s.handler.TokenizeJSON(string(body))
 			if err != nil {
 				log.Printf("Error tokenizing JSON response: %v", err)
@@ -272,7 +274,7 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 			}
 		}
 	}
-	
+
 	// Send response
 	if !modified {
 		// No modification - send 204 No Content
@@ -282,7 +284,7 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 		writer.WriteString(response)
 	} else {
 		// Modified - send 200 OK with new body
-		
+
 		// Build HTTP response first to calculate exact positions
 		// Include HTTP status line + headers
 		httpHeadersStr := httpRequest + "\r\n" // HTTP status line
@@ -295,61 +297,65 @@ func (s *Server) handleICAPRespmod(reader *bufio.Reader, writer *bufio.Writer, i
 			}
 		}
 		httpHeadersStr += "\r\n" // End of headers
-		
+
 		// Calculate exact byte positions for Encapsulated header
 		resBodyOffset := len(httpHeadersStr)
-		
+
 		// Build ICAP response
 		response := "ICAP/1.0 200 OK\r\n"
 		response += "ISTag: \"TS-001\"\r\n"
 		response += fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n", resBodyOffset)
 		response += "\r\n"
-		
+
 		// Write ICAP headers
 		writer.WriteString(response)
-		
+
 		// Write HTTP response headers
 		writer.WriteString(httpHeadersStr)
-		
+
 		// Write modified body in chunks
 		s.writeChunked(writer, modifiedBody)
 	}
-	
+
 	writer.Flush()
 }
 
 func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (string, []string, []byte, error) {
 	log.Printf("DEBUG_FORCE: parseEncapsulated called with header: %s", encapHeader)
-	
+// 🔒 VOTAL.AI Security Fix: Improper Parsing of Encapsulated Header Without Validation [CWE-20] - MEDIUM
+
 	// Parse positions from Encapsulated header
 	positions := make(map[string]int)
 	parts := strings.Split(encapHeader, ",")
 	for _, part := range parts {
 		kv := strings.Split(strings.TrimSpace(part), "=")
 		if len(kv) == 2 {
-			pos, _ := strconv.Atoi(kv[1])
+			pos, err := strconv.Atoi(kv[1])
+			if err != nil || pos < 0 || pos > 10485760 {
+				continue
+			}
 			positions[kv[0]] = pos
 		}
 	}
-	
+
 	if s.debug {
 		log.Printf("DEBUG: parseEncapsulated positions: %+v", positions)
 	}
-	
+
 	// For RESPMOD: req-hdr=0, res-hdr=175, res-body=322
 	// This means: request headers start at 0, response headers at 175, response body at 322
-	
+
 	var requestLine string
 	var httpHeaders []string
 	var body []byte
 	var err error
-	
+
 	// Determine if this is REQMOD or RESPMOD
 	isRespmod := false
 	if _, hasResHdr := positions["res-hdr"]; hasResHdr {
 		isRespmod = true
 	}
-	
+
 	if isRespmod {
 		// RESPMOD: Skip request headers section if present, then read response headers
 		if _, hasReqHdr := positions["req-hdr"]; hasReqHdr {
@@ -367,8 +373,8 @@ func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (st
 				}
 			}
 		}
-		
-		// Read response status line and headers  
+
+		// Read response status line and headers
 		if s.debug {
 			log.Printf("DEBUG: Reading response headers section for RESPMOD")
 		}
@@ -377,7 +383,7 @@ func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (st
 			return "", nil, nil, err
 		}
 		requestLine = strings.TrimSpace(requestLine)
-		
+
 		// Read HTTP response headers
 		for {
 			line, err := reader.ReadString('\n')
@@ -400,7 +406,7 @@ func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (st
 			return "", nil, nil, err
 		}
 		requestLine = strings.TrimSpace(requestLine)
-		
+
 		// Read HTTP request headers
 		for {
 			line, err := reader.ReadString('\n')
@@ -414,7 +420,7 @@ func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (st
 			httpHeaders = append(httpHeaders, line)
 		}
 	}
-	
+
 	// Read body if present
 	if _, hasReqBody := positions["req-body"]; hasReqBody {
 		if s.debug {
@@ -445,22 +451,22 @@ func (s *Server) parseEncapsulated(reader *bufio.Reader, encapHeader string) (st
 		// For null-body cases, we still need to return a proper response
 		// This typically means there's no body to process
 	}
-	
+
 	if s.debug {
-		log.Printf("DEBUG: parseEncapsulated result - requestLine: '%s', headers: %d, body: %d bytes", 
+		log.Printf("DEBUG: parseEncapsulated result - requestLine: '%s', headers: %d, body: %d bytes",
 			requestLine, len(httpHeaders), len(body))
 	}
-	
+
 	return requestLine, httpHeaders, body, nil
 }
 
 func (s *Server) readChunked(reader *bufio.Reader) ([]byte, error) {
 	var result []byte
-	
+
 	if s.debug {
 		log.Printf("DEBUG: readChunked starting")
 	}
-	
+
 	for {
 		// Read chunk size
 		sizeLine, err := reader.ReadString('\n')
@@ -470,12 +476,12 @@ func (s *Server) readChunked(reader *bufio.Reader) ([]byte, error) {
 			}
 			return nil, err
 		}
-		
+
 		sizeLine = strings.TrimSpace(sizeLine)
 		if s.debug {
 			log.Printf("DEBUG: readChunked size line: '%s'", sizeLine)
 		}
-		
+
 		size, err := strconv.ParseInt(sizeLine, 16, 64)
 		if err != nil {
 			if s.debug {
@@ -483,30 +489,30 @@ func (s *Server) readChunked(reader *bufio.Reader) ([]byte, error) {
 			}
 			return nil, err
 		}
-		
+
 		if s.debug {
 			log.Printf("DEBUG: readChunked chunk size: %d", size)
 		}
-		
+
 		if size == 0 {
 			// Read final CRLF
-			reader.ReadString('\n')
+			_, _ = reader.ReadString('\n')
 			break
 		}
-		
+
 		// Read chunk data
 		chunk := make([]byte, size)
 		_, err = io.ReadFull(reader, chunk)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		result = append(result, chunk...)
-		
+
 		// Read trailing CRLF
-		reader.ReadString('\n')
+		_, _ = reader.ReadString('\n')
 	}
-	
+
 	return result, nil
 }
 
