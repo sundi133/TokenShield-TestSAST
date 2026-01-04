@@ -1,12 +1,12 @@
 package tokenizer
 
 import (
+	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
-	cryptorand "crypto/rand"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,16 +25,16 @@ type KeyManager interface {
 // StorageInterface defines methods for token storage
 type StorageInterface interface {
 	StoreCard(token, cardNumber string) error
-	RetrieveCard(token string) string
+	RetrieveCard(token string) (string, bool)
 }
 
 // TokenizerConfig holds configuration for the tokenizer
 type TokenizerConfig struct {
-	TokenFormat     string // "prefix" or "luhn"
-	UseKEKDEK      bool
-	DebugMode      bool
-	TokenRegex     *regexp.Regexp
-	CardRegex      *regexp.Regexp
+	TokenFormat string // "prefix" or "luhn"
+	UseKEKDEK   bool
+	DebugMode   bool
+	TokenRegex  *regexp.Regexp
+	CardRegex   *regexp.Regexp
 }
 
 // Tokenizer handles all tokenization and detokenization operations
@@ -61,15 +61,15 @@ func (t *Tokenizer) TokenizeJSON(jsonStr string) (string, bool, error) {
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 		return jsonStr, false, err
 	}
-	
+
 	modified := false
 	t.processValue(&data, &modified, true) // true for tokenization
-	
+
 	result, err := json.Marshal(data)
 	if err != nil {
 		return jsonStr, false, err
 	}
-	
+
 	return string(result), modified, nil
 }
 
@@ -78,28 +78,28 @@ func (t *Tokenizer) DetokenizeJSON(jsonStr string) (string, bool, error) {
 	if t.config.DebugMode {
 		log.Printf("DEBUG: detokenizeJSON called with: %s", jsonStr[:utils.Min(200, len(jsonStr))])
 	}
-	
+
 	var data interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 		return jsonStr, false, err
 	}
-	
+
 	if t.config.DebugMode {
 		log.Printf("DEBUG: Unmarshaled data type: %T", data)
 	}
-	
+
 	modified := false
 	t.processValue(&data, &modified, false) // false for detokenization
-	
+
 	if t.config.DebugMode {
 		log.Printf("DEBUG: detokenizeJSON modified=%v", modified)
 	}
-	
+
 	result, err := json.Marshal(data)
 	if err != nil {
 		return jsonStr, false, err
 	}
-	
+
 	return string(result), modified, nil
 }
 
@@ -108,21 +108,21 @@ func (t *Tokenizer) DetokenizeHTML(htmlStr string) (string, bool, error) {
 	if t.config.DebugMode {
 		log.Printf("DEBUG: detokenizeHTML called, length: %d", len(htmlStr))
 	}
-	
+
 	modified := false
 	result := htmlStr
-	
+
 	// Find all tokens in the HTML content
 	matches := t.config.TokenRegex.FindAllString(htmlStr, -1)
 	if t.config.DebugMode {
 		log.Printf("DEBUG: Found %d potential tokens in HTML", len(matches))
 	}
-	
+
 	for _, token := range matches {
 		if t.config.DebugMode {
 			log.Printf("DEBUG: Attempting to detokenize token: %s", token)
 		}
-		if card := t.storage.RetrieveCard(token); card != "" {
+		if card, ok := t.storage.RetrieveCard(token); ok {
 			result = strings.ReplaceAll(result, token, card)
 			modified = true
 			log.Printf("Detokenized token %s in HTML content", token)
@@ -130,7 +130,7 @@ func (t *Tokenizer) DetokenizeHTML(htmlStr string) (string, bool, error) {
 			log.Printf("DEBUG: Failed to retrieve card for token: %s", token)
 		}
 	}
-	
+
 	return result, modified, nil
 }
 
@@ -146,12 +146,12 @@ func (t *Tokenizer) processValue(v interface{}, modified *bool, tokenize bool) {
 		if t.config.DebugMode && !tokenize {
 			log.Printf("DEBUG: Processing map with keys: %v", t.getMapKeys(val))
 		}
-		for k, v := range val {
+		for k, mv := range val {
 			if t.config.DebugMode && !tokenize {
-				log.Printf("DEBUG: Processing map key '%s' with value type %T", k, v)
+				log.Printf("DEBUG: Processing map key '%s' with value type %T", k, mv)
 			}
 			if tokenize && t.isCreditCardField(k) {
-				if str, ok := v.(string); ok && t.config.CardRegex.MatchString(str) {
+				if str, ok := mv.(string); ok && t.config.CardRegex.MatchString(str) {
 					// Don't tokenize if it's already one of our tokens
 					if t.config.TokenFormat == "luhn" && strings.HasPrefix(str, "9999") {
 						// This is already a token, skip it
@@ -161,46 +161,59 @@ func (t *Tokenizer) processValue(v interface{}, modified *bool, tokenize bool) {
 						// This is already a token, skip it
 						continue
 					}
-					
-					token := t.generateToken()
-					if token != "" {
+
+					token, err := t.generateToken()
+					if err != nil {
+						log.Printf("Error generating token: %v", err)
+					} else if token != "" {
 						val[k] = token
 						*modified = true
-						
+						// 🔒 VOTAL.AI Security Fix: Improper Handling of Sensitive Data in Logs [CWE-532] - MEDIUM
+
 						// Store the mapping
 						if err := t.storage.StoreCard(token, str); err != nil {
 							log.Printf("Error storing card: %v", err)
 						} else {
-							log.Printf("Tokenized card ending in %s -> %s", str[len(str)-4:], token)
+							log.Printf("Tokenized card ending in **** -> %s", token) // FIXED: do not log sensitive card data
 						}
 					}
 				}
-			} else if !tokenize && t.config.TokenRegex.MatchString(fmt.Sprintf("%v", v)) {
+			} else if !tokenize && t.config.TokenRegex.MatchString(fmt.Sprintf("%v", mv)) {
 				// Detokenization
-				if str, ok := v.(string); ok {
+				if str, ok := mv.(string); ok {
 					if t.config.DebugMode {
 						log.Printf("DEBUG: Found token %s for key %s", str, k)
 					}
-					if card := t.storage.RetrieveCard(str); card != "" {
+					if card, ok := t.storage.RetrieveCard(str); ok {
 						val[k] = card
 						*modified = true
 						if t.config.DebugMode {
-							log.Printf("DEBUG: Detokenized %s to card ending in %s", str, card[len(card)-4:])
+							if len(card) >= 4 {
+								log.Printf("DEBUG: Detokenized %s to card ending in %s", str, card[len(card)-4:])
+							} else {
+								log.Printf("DEBUG: Detokenized %s to card", str)
+							}
 						}
 					} else if t.config.DebugMode {
 						log.Printf("DEBUG: Failed to retrieve card for token %s", str)
 					}
 				}
 			}
-			t.processValue(v, modified, tokenize)
+
+			// Recurse only into nested structures to avoid redundant work.
+			switch mv.(type) {
+			case map[string]interface{}, []interface{}, *interface{}:
+				t.processValue(mv, modified, tokenize)
+			}
 		}
 	case []interface{}:
 		if t.config.DebugMode && !tokenize {
 			log.Printf("DEBUG: Processing array with %d elements", len(val))
 		}
-		for i, elem := range val {
-			t.processValue(&val[i], modified, tokenize)
-			if val[i] != elem {
+		for i := range val {
+			before := val[i]
+			t.processValue(val[i], modified, tokenize)
+			if val[i] != before {
 				*modified = true
 			}
 		}
@@ -227,7 +240,7 @@ func (t *Tokenizer) isCreditCardField(fieldName string) bool {
 			return true
 		}
 	}
-	
+
 	// Partial matches for compound names (original logic)
 	cardFields := []string{"card_number", "cardnumber", "creditcard", "credit_card", "account_number"}
 	for _, field := range cardFields {
@@ -239,56 +252,57 @@ func (t *Tokenizer) isCreditCardField(fieldName string) bool {
 }
 
 // generateToken creates a new token based on the configured format
-func (t *Tokenizer) generateToken() string {
+func (t *Tokenizer) generateToken() (string, error) {
 	if t.config.TokenFormat == "luhn" {
-		return t.generateLuhnToken()
+		return t.generateLuhnToken(), nil
 	}
-	
+
 	// Default prefix format - restore original logic
 	b := make([]byte, 32)
-	cryptorand.Read(b)
-	return "tok_" + base64.URLEncoding.EncodeToString(b)
+	if _, err := cryptorand.Read(b); err != nil {
+		return "", err
+	}
+	return "tok_" + base64.URLEncoding.EncodeToString(b), nil
 }
 
 // generateLuhnToken creates a Luhn-valid 16-digit token starting with 9999
 func (t *Tokenizer) generateLuhnToken() string {
 	// Start with our special prefix
 	prefix := "9999"
-	
+
 	// Generate 11 random digits (restore original logic)
 	randomPart := make([]byte, 11)
 	for i := 0; i < 11; i++ {
 		randomPart[i] = byte(rand.Intn(10)) + '0'
 	}
 	partial := prefix + string(randomPart)
-	
+
 	// Calculate Luhn check digit
 	checkDigit := t.calculateLuhnCheckDigit(partial)
-	
+
 	return partial + strconv.Itoa(checkDigit)
 }
-
 
 // calculateLuhnCheckDigit calculates the Luhn algorithm check digit (correct version)
 func (t *Tokenizer) calculateLuhnCheckDigit(number string) int {
 	sum := 0
 	alternate := false
-	
+
 	// Process from right to left
 	for i := len(number) - 1; i >= 0; i-- {
 		digit := int(number[i] - '0')
-		
+
 		if alternate {
 			digit *= 2
 			if digit > 9 {
-				digit = digit/10 + digit%10  // Correct Luhn algorithm
+				digit = digit/10 + digit%10 // Correct Luhn algorithm
 			}
 		}
-		
+
 		sum += digit
 		alternate = !alternate
 	}
-	
+
 	return (10 - (sum % 10)) % 10
 }
 
@@ -300,6 +314,9 @@ func (t *Tokenizer) EncryptCardNumber(data string) ([]byte, error) {
 		return encrypted, err
 	} else {
 		// Use legacy Fernet encryption
+		if t.encryptionKey == nil {
+			return nil, fmt.Errorf("encryption key is nil")
+		}
 		return fernet.EncryptAndSign([]byte(data), t.encryptionKey)
 	}
 }
@@ -314,8 +331,11 @@ func (t *Tokenizer) DecryptCardNumber(encryptedData []byte) (string, error) {
 		}
 		// Fall back to legacy if KEK/DEK fails
 	}
-	
+
 	// Use legacy Fernet decryption
+	if t.encryptionKey == nil {
+		return "", fmt.Errorf("encryption key is nil")
+	}
 	decrypted := fernet.VerifyAndDecrypt(encryptedData, 0, []*fernet.Key{t.encryptionKey})
 	if decrypted == nil {
 		return "", fmt.Errorf("fernet decryption failed")
@@ -325,5 +345,9 @@ func (t *Tokenizer) DecryptCardNumber(encryptedData []byte) (string, error) {
 
 // GenerateToken creates a new token (exported wrapper for generateToken)
 func (t *Tokenizer) GenerateToken() string {
-	return t.generateToken()
+	token, err := t.generateToken()
+	if err != nil {
+		return ""
+	}
+	return token
 }
